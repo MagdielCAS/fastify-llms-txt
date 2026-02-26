@@ -1,0 +1,55 @@
+{
+	"name": "fastify-llms-txt",
+	"version": "1.0.0",
+	"description": "Fastify plugin to generate llms.txt from OpenAPI specs",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"type": "module",
+	"scripts": {
+		"build": "tsc",
+		"test": "npm run test:unit && npm run test:typescript",
+		"test:unit": "c8 --100 node --test dist/**/*.test.js",
+		"test:typescript": "tsd",
+		"lint": "biome check .",
+		"lint:fix": "biome check --write .",
+		"prepublishOnly": "npm run build"
+	},
+	"keywords": [
+		"fastify",
+		"plugin",
+		"llms.txt",
+		"openapi",
+		"swagger",
+		"markdown",
+		"llm"
+	],
+	"author": "",
+	"license": "MIT",
+	"peerDependencies": {
+		"fastify": ">=5.0.0",
+		"js-yaml": "*"
+	},
+	"peerDependenciesMeta": {
+		"js-yaml": {
+			"optional": true
+		}
+	},
+	"dependencies": {
+		"fastify-plugin": "^5.0.1"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.4",
+		"@fastify/swagger": "^9.4.0",
+		"@types/js-yaml": "^4.0.9",
+		"@types/node": "^22.13.1",
+		"c8": "^10.1.3",
+		"fastify": "^5.2.1",
+		"js-yaml": "^4.1.0",
+		"tsd": "^0.31.2",
+		"typescript": "^5.7.3"
+	},
+	"engines": {
+		"node": ">=20.0.0"
+	},
+	"files": ["dist"]
+}

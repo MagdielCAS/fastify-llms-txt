@@ -1,0 +1,28 @@
+{
+	"openapi": "3.0.0",
+	"info": {
+		"title": "Sample API",
+		"version": "1.0.0",
+		"description": "A sample API for testing llms.txt generation"
+	},
+	"paths": {
+		"/hello": {
+			"get": {
+				"summary": "Say Hello",
+				"responses": {
+					"200": {
+						"description": "OK",
+						"content": {
+							"text/plain": {
+								"schema": {
+									"type": "string",
+									"example": "Hello World"
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
