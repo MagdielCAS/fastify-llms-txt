@@ -4,6 +4,7 @@ import process from "node:process";
 import { test } from "node:test";
 import type { LLMsOptions } from "../types.js";
 import {
+	isInside,
 	isPrivateHost,
 	validateFilePath,
 	validateOptions,
@@ -238,4 +239,44 @@ test("validateOptions", async (t) => {
 			}),
 		);
 	});
+});
+
+test("validateFilePath works with a filesystem root as the base", () => {
+	// A prefix comparison would build "//" here and reject every descendant.
+	assert.strictEqual(validateFilePath("tmp/spec.json", "/"), "/tmp/spec.json");
+	assert.strictEqual(validateFilePath("/tmp/spec.json", "/"), "/tmp/spec.json");
+});
+
+test("isInside", () => {
+	assert.strictEqual(isInside("/base", "/base"), true);
+	assert.strictEqual(isInside("/base", "/base/child.json"), true);
+	assert.strictEqual(isInside("/base", "/base-evil/child.json"), false);
+	assert.strictEqual(isInside("/base", "/elsewhere"), false);
+	assert.strictEqual(isInside("/", "/tmp/spec.json"), true);
+});
+
+test("validateOptions rejects arrays posing as objects", () => {
+	assert.throws(
+		() => validateOptions([] as unknown as LLMsOptions),
+		/expected an object/,
+	);
+	assert.throws(
+		() => validateOptions({ source: [] } as unknown as LLMsOptions),
+		/'source' must be an object/,
+	);
+});
+
+test("validateOptions requires skipValidation to be a boolean", () => {
+	// A truthy string would otherwise silently disable the SSRF guard.
+	assert.throws(
+		() =>
+			validateOptions({
+				source: {
+					type: "url",
+					url: "http://127.0.0.1/spec",
+					skipValidation: "false",
+				},
+			} as unknown as LLMsOptions),
+		/'source.skipValidation' must be a boolean/,
+	);
 });

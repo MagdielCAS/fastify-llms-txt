@@ -20,7 +20,9 @@ function mockFetch(
 ) {
 	return t.mock.method(globalThis, "fetch", async (input: unknown) => ({
 		ok: true,
+		status: 200,
 		statusText: "OK",
+		headers: new Headers(),
 		text: async () => body,
 		url: String(input),
 	}));
@@ -175,7 +177,24 @@ test("fastify-llms-txt plugin", async (t) => {
 	);
 
 	await t.test(
-		"resolves a relative URL from the request when not listening",
+		"refuses to trust the Host header for a relative URL when not listening",
+		async (st) => {
+			const fetchMock = mockFetch(st, "{}");
+
+			const fastify = Fastify();
+			await fastify.register(fastifyLlmsTxt, {
+				source: { type: "url", url: "swagger/json" },
+			});
+
+			const res = await fastify.inject({ method: "GET", url: "/llms.txt" });
+			assert.strictEqual(res.statusCode, 500);
+			assert.ok(res.payload.includes("the server is not listening"));
+			assert.strictEqual(fetchMock.mock.callCount(), 0);
+		},
+	);
+
+	await t.test(
+		"resolves against the Host header once skipValidation opts in",
 		async (st) => {
 			const fetchMock = mockFetch(
 				st,
@@ -188,7 +207,7 @@ test("fastify-llms-txt plugin", async (t) => {
 
 			const fastify = Fastify();
 			await fastify.register(fastifyLlmsTxt, {
-				source: { type: "url", url: "swagger/json" },
+				source: { type: "url", url: "swagger/json", skipValidation: true },
 			});
 
 			const res = await fastify.inject({ method: "GET", url: "/llms.txt" });
@@ -199,10 +218,33 @@ test("fastify-llms-txt plugin", async (t) => {
 		},
 	);
 
+	await t.test(
+		"a protocol-relative source URL is not treated as local",
+		async (st) => {
+			// '//host/path' looks relative but resolves to a foreign origin, so
+			// it must still face the SSRF guard.
+			const fetchMock = mockFetch(st, "{}");
+
+			const fastify = Fastify();
+			await fastify.register(fastifyLlmsTxt, {
+				source: { type: "url", url: "//169.254.169.254/latest/meta-data" },
+			});
+			await fastify.listen({ port: 0, host: "127.0.0.1" });
+			t.after(() => fastify.close());
+
+			const res = await fastify.inject({ method: "GET", url: "/llms.txt" });
+			assert.strictEqual(res.statusCode, 500);
+			assert.ok(res.payload.includes("SSRF Protection"));
+			assert.strictEqual(fetchMock.mock.callCount(), 0);
+		},
+	);
+
 	await t.test("handles fetch errors", async (st) => {
 		st.mock.method(globalThis, "fetch", async () => ({
 			ok: false,
+			status: 404,
 			statusText: "Not Found",
+			headers: new Headers(),
 		}));
 
 		const fastify = Fastify({ logger: false });

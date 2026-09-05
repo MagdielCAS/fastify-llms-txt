@@ -94,6 +94,22 @@ export function validateUrl(inputUrl: string): void {
 	}
 }
 
+/**
+ * Lexical containment check: is `target` `base` itself, or below it?
+ *
+ * `path.relative` is used rather than a prefix comparison so that a
+ * filesystem root works as a base and `/base-evil` is not read as `/base`.
+ */
+export function isInside(base: string, target: string): boolean {
+	if (target === base) return true;
+	const relative = path.relative(base, target);
+	return (
+		relative.length > 0 &&
+		!relative.startsWith("..") &&
+		!path.isAbsolute(relative)
+	);
+}
+
 /** Resolves `inputPath` and guarantees it stays inside `basePath`. */
 export function validateFilePath(
 	inputPath: string,
@@ -102,10 +118,7 @@ export function validateFilePath(
 	const normalizedBase = path.resolve(basePath);
 	const resolved = path.resolve(normalizedBase, inputPath);
 
-	if (
-		resolved !== normalizedBase &&
-		!resolved.startsWith(normalizedBase + path.sep)
-	) {
+	if (!isInside(normalizedBase, resolved)) {
 		throw new Error(
 			`Path Traversal detected: ${inputPath} is outside base directory ${basePath}`,
 		);
@@ -128,7 +141,7 @@ function assertPositiveNumber(value: unknown, name: string): void {
 
 /** Validates the plugin options at registration time so misconfiguration fails fast. */
 export function validateOptions(options: LLMsOptions): void {
-	if (!options || typeof options !== "object") {
+	if (!options || typeof options !== "object" || Array.isArray(options)) {
 		throw new Error("Invalid options: expected an object.");
 	}
 
@@ -159,7 +172,7 @@ export function validateOptions(options: LLMsOptions): void {
 	const { source } = options;
 	if (source === undefined) return;
 
-	if (typeof source !== "object" || source === null) {
+	if (typeof source !== "object" || source === null || Array.isArray(source)) {
 		throw new Error("Invalid options: 'source' must be an object.");
 	}
 
@@ -177,6 +190,14 @@ export function validateOptions(options: LLMsOptions): void {
 		if (typeof source.url !== "string" || source.url.length === 0) {
 			throw new Error(
 				"Invalid options: 'source.url' must be a non-empty string.",
+			);
+		}
+		if (
+			source.skipValidation !== undefined &&
+			typeof source.skipValidation !== "boolean"
+		) {
+			throw new Error(
+				"Invalid options: 'source.skipValidation' must be a boolean.",
 			);
 		}
 		if (!source.skipValidation) {

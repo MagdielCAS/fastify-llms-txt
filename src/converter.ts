@@ -26,6 +26,9 @@ export class OpenAPIToMarkdownConverter {
 		if (!spec.info || typeof spec.info.title !== "string") {
 			throw new Error("Invalid OpenAPI spec: missing 'info.title'");
 		}
+		if (typeof spec.info.version !== "string") {
+			throw new Error("Invalid OpenAPI spec: missing 'info.version'");
+		}
 		this.#spec = spec;
 	}
 

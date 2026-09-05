@@ -1,7 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { OpenAPISpec } from "../types.js";
-import { validateFilePath, validateUrl } from "./validation.js";
+import { isInside, validateFilePath, validateUrl } from "./validation.js";
+
+/** Redirect hops followed before giving up, matching the fetch spec's limit. */
+const MAX_REDIRECTS = 20;
 
 const YAML_EXTENSIONS = new Set([".yaml", ".yml"]);
 
@@ -98,19 +101,62 @@ export async function parseFromFile(
 	basePath?: string,
 ): Promise<OpenAPISpec> {
 	const filePath = validateFilePath(file, basePath);
-	const content = await fs.readFile(filePath, "utf-8");
-	return parseSpec(content, filePath);
+
+	// The lexical check above cannot see through symlinks, so re-check the
+	// canonical path: a link inside basePath may still point outside it.
+	const base = path.resolve(basePath ?? process.cwd());
+	const [realBase, realPath] = await Promise.all([
+		fs.realpath(base),
+		fs.realpath(filePath),
+	]);
+	if (!isInside(realBase, realPath)) {
+		throw new Error(
+			`Path Traversal detected: ${file} resolves outside base directory ${base}`,
+		);
+	}
+
+	const content = await fs.readFile(realPath, "utf-8");
+	return parseSpec(content, realPath);
+}
+
+/**
+ * Fetches a URL, following redirects one hop at a time.
+ *
+ * `fetch` follows redirects itself, but only the first URL would ever be
+ * validated: a permitted host could bounce the request to an internal address.
+ * Every hop is checked instead.
+ */
+async function fetchFollowingRedirects(
+	url: string,
+	skipValidation: boolean,
+): Promise<Response> {
+	let target = url;
+
+	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+		if (!skipValidation) {
+			validateUrl(target);
+		}
+
+		const res = await fetch(target, { redirect: "manual" });
+		if (res.status < 300 || res.status > 399) {
+			return res;
+		}
+
+		const location = res.headers.get("location");
+		if (!location) {
+			return res;
+		}
+		target = new URL(location, target).toString();
+	}
+
+	throw new Error(`Too many redirects while fetching spec from ${url}`);
 }
 
 export async function parseFromUrl(
 	url: string,
 	skipValidation = false,
 ): Promise<OpenAPISpec> {
-	if (!skipValidation) {
-		validateUrl(url);
-	}
-
-	const res = await fetch(url);
+	const res = await fetchFollowingRedirects(url, skipValidation);
 	if (!res.ok) {
 		throw new Error(`Failed to fetch spec from ${url}: ${res.statusText}`);
 	}

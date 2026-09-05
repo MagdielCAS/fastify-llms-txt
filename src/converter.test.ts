@@ -91,3 +91,15 @@ test("OpenAPIToMarkdownConverter is reusable", () => {
 	const converter = new OpenAPIToMarkdownConverter(spec);
 	assert.strictEqual(converter.convert(), converter.convert());
 });
+
+test("OpenAPIToMarkdownConverter requires info.version", () => {
+	// Without this guard the heading renders as "# API vundefined".
+	assert.throws(
+		() =>
+			new OpenAPIToMarkdownConverter({
+				openapi: "3.1.0",
+				info: { title: "API" },
+			} as unknown as OpenAPISpec),
+		/missing 'info.version'/,
+	);
+});

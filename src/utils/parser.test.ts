@@ -1,4 +1,6 @@
 import assert from "node:assert";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { test } from "node:test";
@@ -112,6 +114,8 @@ test("parseFromFile rejects paths outside the base directory", async () => {
 test("parseFromUrl fetches and parses a spec", async (t) => {
 	t.mock.method(globalThis, "fetch", async () => ({
 		ok: true,
+		status: 200,
+		headers: new Headers(),
 		text: async () =>
 			'{"openapi":"3.0.0","info":{"title":"Remote","version":"1"}}',
 	}));
@@ -123,7 +127,9 @@ test("parseFromUrl fetches and parses a spec", async (t) => {
 test("parseFromUrl surfaces HTTP failures", async (t) => {
 	t.mock.method(globalThis, "fetch", async () => ({
 		ok: false,
+		status: 404,
 		statusText: "Not Found",
+		headers: new Headers(),
 	}));
 
 	await assert.rejects(
@@ -135,6 +141,8 @@ test("parseFromUrl surfaces HTTP failures", async (t) => {
 test("parseFromUrl validates the URL unless told to skip", async (t) => {
 	const fetchMock = t.mock.method(globalThis, "fetch", async () => ({
 		ok: true,
+		status: 200,
+		headers: new Headers(),
 		text: async () =>
 			'{"openapi":"3.0.0","info":{"title":"Local","version":"1"}}',
 	}));
@@ -147,4 +155,102 @@ test("parseFromUrl validates the URL unless told to skip", async (t) => {
 
 	const spec = await parseFromUrl("http://127.0.0.1/openapi.json", true);
 	assert.strictEqual(spec.info.title, "Local");
+});
+
+test("parseFromUrl validates every redirect hop", async (t) => {
+	// A permitted public host must not be able to bounce the fetch inward.
+	t.mock.method(globalThis, "fetch", async (input: unknown) => {
+		if (String(input) === "https://example.com/spec.json") {
+			return {
+				status: 302,
+				ok: false,
+				headers: new Headers({ location: "http://169.254.169.254/latest" }),
+			};
+		}
+		return {
+			status: 200,
+			ok: true,
+			headers: new Headers(),
+			text: async () =>
+				'{"openapi":"3.0.0","info":{"title":"Internal","version":"1"}}',
+		};
+	});
+
+	await assert.rejects(
+		() => parseFromUrl("https://example.com/spec.json"),
+		/SSRF Protection: Host 169\.254\.169\.254 is blocked/,
+	);
+});
+
+test("parseFromUrl follows a permitted redirect", async (t) => {
+	let hops = 0;
+	t.mock.method(globalThis, "fetch", async (input: unknown) => {
+		hops++;
+		if (String(input) === "https://example.com/spec.json") {
+			return {
+				status: 301,
+				ok: false,
+				headers: new Headers({ location: "/v2/spec.json" }),
+			};
+		}
+		assert.strictEqual(String(input), "https://example.com/v2/spec.json");
+		return {
+			status: 200,
+			ok: true,
+			headers: new Headers(),
+			text: async () =>
+				'{"openapi":"3.0.0","info":{"title":"Moved","version":"1"}}',
+		};
+	});
+
+	const spec = await parseFromUrl("https://example.com/spec.json");
+	assert.strictEqual(spec.info.title, "Moved");
+	assert.strictEqual(hops, 2);
+});
+
+test("parseFromUrl stops after too many redirects", async (t) => {
+	t.mock.method(globalThis, "fetch", async () => ({
+		status: 302,
+		ok: false,
+		headers: new Headers({ location: "https://example.com/loop" }),
+	}));
+
+	await assert.rejects(
+		() => parseFromUrl("https://example.com/loop"),
+		/Too many redirects/,
+	);
+});
+
+test("parseFromUrl treats a redirect without a Location as the response", async (t) => {
+	t.mock.method(globalThis, "fetch", async () => ({
+		status: 304,
+		ok: false,
+		statusText: "Not Modified",
+		headers: new Headers(),
+	}));
+
+	await assert.rejects(
+		() => parseFromUrl("https://example.com/spec.json"),
+		/Failed to fetch spec/,
+	);
+});
+
+test("parseFromFile rejects a symlink escaping the base directory", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llms-symlink-"));
+	const outside = await fs.mkdtemp(path.join(os.tmpdir(), "llms-outside-"));
+	const secret = path.join(outside, "secret.json");
+	await fs.writeFile(
+		secret,
+		'{"openapi":"3.0.0","info":{"title":"Secret","version":"1"}}',
+	);
+	await fs.symlink(secret, path.join(dir, "spec.json"));
+
+	// The path is lexically inside the base, but the link points out of it.
+	await assert.rejects(
+		() => parseFromFile("spec.json", dir),
+		/resolves outside base directory/,
+	);
+
+	await fs.rm(dir, { recursive: true, force: true });
+	await fs.rm(outside, { recursive: true, force: true });
 });

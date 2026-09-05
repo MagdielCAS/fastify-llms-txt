@@ -32,7 +32,7 @@ This document explains what the project does, why it exists, and how it is put t
 ## Inputs and Configuration (`LLMsOptions`)
 - `source` (optional): `{ type: 'file'; file: string }` or `{ type: 'url'; url: string; skipValidation?: boolean }`. When omitted, the plugin calls `fastify.swagger()`.
   - `file`: absolute or relative path; validated to stay under `basePath`.
-  - `url`: absolute or relative. Relative URLs resolve against the server's own origin (`fastify.listeningOrigin`, falling back to the request's protocol and host) and skip the SSRF check, since they can only address this server. Absolute URLs must be `http:`/`https:` and must not target a blocked host unless `skipValidation` is set.
+  - `url`: absolute or relative. It is resolved against `fastify.listeningOrigin`, and the SSRF check is skipped only when the *resolved* target lands on that same origin — locality is never inferred from the shape of the configured string, so a protocol-relative `//host/path` is validated like any other absolute URL. While the server is not listening there is no trusted origin to compare against and the `Host` header is client-controlled, so a relative URL fails with a clear error unless `skipValidation` opts into `Host`-based resolution.
 - `header` / `footer`: arbitrary Markdown placed before/after the generated content.
 - `contentType`: `text/markdown` (default) or `text/plain`; suffixed with `; charset=utf-8`.
 - `basePath`: directory a `file` source must stay within; defaults to `process.cwd()`.
@@ -53,8 +53,9 @@ This document explains what the project does, why it exists, and how it is put t
 - `format.ts` standardises headings, inline code, code blocks, lists, links, `$ref` resolution (including `~0`/`~1` JSON-Pointer escapes) and short schema names such as `User[]` or `string | number`.
 
 ## Validation and Safety
-- URL validation (`validateUrl`): rejects non-`http(s)` protocols and blocks localhost, loopback, unspecified, link-local (including cloud metadata endpoints), unique-local, carrier-grade-NAT and private-network hosts across IPv4, IPv6 and IPv4-mapped IPv6 (both the dotted and hex spellings the URL parser produces).
-- File path validation (`validateFilePath`): resolves the path and ensures it stays inside the base directory, so a sibling directory sharing the base prefix is rejected too.
+- URL validation (`validateUrl`): rejects non-`http(s)` protocols and blocks localhost, loopback, unspecified, link-local (including cloud metadata endpoints), unique-local, carrier-grade-NAT and private-network hosts across IPv4, IPv6 and IPv4-mapped IPv6 (both the dotted and hex spellings the URL parser produces). Redirects are followed manually, one hop at a time, so every hop is validated and a permitted host cannot bounce the request inward; the hop count is capped.
+  - Known limitation: the check is by hostname, so DNS rebinding (a public name resolving to a private address) is not caught. Closing that needs address resolution plus connection pinning through a custom dispatcher. `source` is developer-configured rather than request-supplied, so the exposure is limited, but `source.url` should not be fed untrusted input.
+- File path validation (`validateFilePath`): resolves the path with `path.relative` and ensures it stays inside the base directory, so a sibling sharing the base prefix is rejected and a filesystem root works as a base. `parseFromFile` then re-checks the canonical path via `fs.realpath`, so a symlink inside the base cannot point outside it.
 - Option validation (`validateOptions`): checks types and shapes for `header`, `footer`, `basePath`, `contentType`, `cache` and `source`, and runs the path/URL guards eagerly.
 - YAML parsing: attempted when the source name suggests YAML or the content is not JSON. A JSON document served from a `.yaml` URL still parses without `js-yaml`; when YAML really is needed and the module is missing, the error explains how to install it.
 

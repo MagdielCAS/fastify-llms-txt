@@ -92,11 +92,21 @@ Options are validated when the plugin is registered, so a misconfiguration fails
 | Option | Type | Description |
 | :--- | :--- | :--- |
 | `type` | `'file' \| 'url'` | The type of source. |
-| `file` | `string` | Path to the OpenAPI file (when `type` is `'file'`). Absolute or relative to `basePath`; paths escaping it are rejected. |
+| `file` | `string` | Path to the OpenAPI file (when `type` is `'file'`). Absolute or relative to `basePath`; paths escaping it are rejected, symlinks included. |
 | `url` | `string` | URL of the OpenAPI spec (when `type` is `'url'`). Relative URLs resolve against this server's own origin. |
-| `skipValidation` | `boolean` | Skip the SSRF check on absolute URLs. Default `false`. |
+| `skipValidation` | `boolean` | Skip the SSRF check entirely. Default `false`. |
 
-Absolute URLs are checked before they are fetched: only `http:` and `https:` are allowed, and loopback, link-local, unique-local, carrier-grade-NAT and private-network hosts are blocked (IPv4, IPv6 and IPv4-mapped IPv6 alike). Set `skipValidation: true` when you deliberately point at an internal service. Relative URLs skip the check, since they can only ever address this server.
+### URL safety
+
+A URL is checked before it is fetched: only `http:` and `https:` are allowed, and loopback, link-local, unique-local, carrier-grade-NAT and private-network hosts are blocked (IPv4, IPv6 and IPv4-mapped IPv6 alike). Redirects are followed one hop at a time and every hop is checked, so a permitted host cannot bounce the request to an internal address.
+
+The check is skipped only for a target that resolves to this server's **own listening origin** — such a fetch cannot reach anywhere the process could not already reach. Note what that does *not* include: a protocol-relative URL like `//example.com/spec.json` looks relative but resolves to a foreign origin, so it is validated like any other absolute URL.
+
+While the server is not listening (`fastify.inject`, some serverless adaptors) it has no origin of its own to compare against, and the request's `Host` header is client-controlled. A relative URL therefore fails with a clear error; use an absolute URL, or set `skipValidation: true` to accept resolution against `Host`.
+
+Set `skipValidation: true` when you deliberately point at an internal service.
+
+**Known limitation:** validation is by hostname, so a public hostname whose DNS record resolves to a private address (a DNS-rebinding attack) is not caught. Closing that requires resolving the address and pinning the connection to it. Since `source` is set by you at registration rather than supplied per request, this is a much weaker threat here than in a general-purpose URL fetcher — but do not treat `source.url` as safe for untrusted input.
 
 ### Cache object
 

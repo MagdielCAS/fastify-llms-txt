@@ -374,7 +374,7 @@ test("generatePaths renders full operation metadata", () => {
 						},
 					},
 					"404": { $ref: "#/components/responses/NotFound" },
-					"500": {},
+					"500": { description: "" },
 				},
 			},
 		},
@@ -561,7 +561,7 @@ test("generateComponents renders reusable responses and parameters", () => {
 				},
 				headers: { "X-Trace": { schema: { type: "string" } } },
 			},
-			Empty: {},
+			Empty: { description: "" },
 			Shared: { $ref: "#/components/responses/NotFound" },
 		},
 		parameters: {
@@ -579,4 +579,51 @@ test("generateComponents renders reusable responses and parameters", () => {
 	assert.ok(output.includes("Reference: #/components/responses/NotFound"));
 	assert.ok(output.includes("### Reusable Parameters"));
 	assert.ok(output.includes("- `X-Trace-Id` (header): string"));
+});
+
+test("an operation parameter overrides the path-level one it shadows", () => {
+	// OpenAPI identifies a parameter by (name, in); the operation-level entry
+	// wins rather than being listed alongside the inherited one.
+	const output = generatePaths({
+		"/u/{id}": {
+			parameters: [
+				{
+					name: "id",
+					in: "path",
+					required: true,
+					schema: { type: "string" },
+					description: "path-level",
+				},
+				{ name: "trace", in: "header", schema: { type: "string" } },
+				{ $ref: "#/components/parameters/Shared" },
+			],
+			get: {
+				parameters: [
+					{
+						name: "id",
+						in: "path",
+						required: true,
+						schema: { type: "integer" },
+						description: "operation override",
+					},
+					{ $ref: "#/components/parameters/Shared" },
+				],
+				responses: {},
+			},
+		},
+	});
+
+	const rendered = output.split("\n").filter((line) => line.startsWith("- "));
+	assert.deepStrictEqual(rendered, [
+		"- `id*` (path): operation override integer",
+		"- `trace` (header): string",
+		"- Ref: #/components/parameters/Shared",
+	]);
+});
+
+test("generatePaths skips a referenced path item", () => {
+	assert.strictEqual(
+		generatePaths({ "/u": { $ref: "#/components/pathItems/Users" } }),
+		"",
+	);
 });

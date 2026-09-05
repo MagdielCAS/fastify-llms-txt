@@ -293,6 +293,27 @@ export function formatSchema(schema: Schema | Reference, depth = 0): string {
 	return lines.join("\n");
 }
 
+/**
+ * Merges path-level parameters with an operation's own.
+ *
+ * OpenAPI identifies a parameter by its (name, in) pair, and an operation-level
+ * entry overrides the path-level one; references cannot be compared that way, so
+ * they are de-duplicated by pointer instead.
+ */
+function mergeParameters(
+	inherited: Array<Parameter | Reference>,
+	own: Array<Parameter | Reference>,
+): Array<Parameter | Reference> {
+	const identity = (p: Parameter | Reference) =>
+		isReference(p) ? `$ref:${p.$ref}` : `${p.in}:${p.name}`;
+
+	const merged = new Map<string, Parameter | Reference>();
+	for (const parameter of [...inherited, ...own]) {
+		merged.set(identity(parameter), parameter);
+	}
+	return [...merged.values()];
+}
+
 function formatParameters(parameters: Array<Parameter | Reference>): string {
 	return formatList(
 		parameters.map((p) => {
@@ -428,7 +449,10 @@ function generateOperation(
 		);
 	}
 
-	const parameters = [...inheritedParameters, ...(operation.parameters ?? [])];
+	const parameters = mergeParameters(
+		inheritedParameters,
+		operation.parameters ?? [],
+	);
 	if (parameters.length > 0) {
 		lines.push(formatHeading("Parameters", 4));
 		lines.push(formatParameters(parameters));
@@ -474,7 +498,9 @@ function generatePathItems(
 	return [formatHeading(heading, 2), ...lines].join("\n\n");
 }
 
-export function generatePaths(paths?: Record<string, PathItem>): string {
+export function generatePaths(
+	paths?: Record<string, PathItem | Reference>,
+): string {
 	if (!paths || Object.keys(paths).length === 0) return "";
 	return generatePathItems("Endpoints", paths, (pathStr) => pathStr);
 }

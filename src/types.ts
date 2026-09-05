@@ -82,7 +82,7 @@ export interface OpenAPISpec {
 	openapi: string;
 	info: Info;
 	servers?: Server[];
-	paths?: Record<string, PathItem>;
+	paths?: Record<string, PathItem | Reference>;
 	components?: Components;
 	security?: SecurityRequirement[];
 	tags?: Tag[];
@@ -165,7 +165,7 @@ export interface MediaType {
 }
 
 export interface Response {
-	description?: string;
+	description: string;
 	headers?: Record<string, Header | Reference>;
 	content?: Record<string, MediaType>;
 }

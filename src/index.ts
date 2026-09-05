@@ -20,34 +20,54 @@ declare module "fastify" {
 const DEFAULT_TTL = 60_000;
 const DEFAULT_MAX_SIZE = 100;
 
-function isAbsoluteUrl(url: string): boolean {
-	return /^https?:\/\//i.test(url);
+/** The origin this server answers on, or "" when it is not listening yet. */
+function trustedOrigin(fastify: FastifyInstance): string {
+	try {
+		return fastify.listeningOrigin;
+	} catch {
+		// `listeningOrigin` throws while there is no bound address.
+		return "";
+	}
 }
 
 /**
- * Resolves a relative source URL against the server's own origin.
+ * Resolves a source URL and reports whether it points back at this server.
  *
- * The listening origin is preferred over the request's Host header, which a
- * client controls and could otherwise point the fetch at an arbitrary host.
+ * Only `sameOrigin` targets may skip the SSRF guard, and only the listening
+ * origin establishes that. Locality cannot be inferred from the shape of the
+ * configured URL: a protocol-relative `//169.254.169.254/` looks relative but
+ * resolves to a foreign host. Nor can the request's Host header stand in for
+ * the server's own origin, since a client controls it.
  */
 function resolveSourceUrl(
 	url: string,
 	fastify: FastifyInstance,
 	req: FastifyRequest,
-): string {
-	if (isAbsoluteUrl(url)) return url;
+	skipValidation: boolean,
+): { target: string; sameOrigin: boolean } {
+	const origin = trustedOrigin(fastify);
 
-	let origin: string;
-	try {
-		origin = fastify.listeningOrigin;
-	} catch {
-		origin = "";
-	}
 	if (!origin) {
-		origin = `${req.protocol}://${req.hostname}`;
+		// No bound address (fastify.inject, serverless adaptors). The Host
+		// header is the only candidate left, so require an explicit opt-in.
+		if (!skipValidation) {
+			try {
+				return { target: new URL(url).toString(), sameOrigin: false };
+			} catch {
+				throw new Error(
+					`Cannot resolve the relative source URL '${url}': the server is not listening, so its own origin is unknown. Use an absolute URL, or set 'source.skipValidation' to resolve it against the request's Host header.`,
+				);
+			}
+		}
+		const base = `${req.protocol}://${req.hostname}`;
+		return { target: new URL(url, base).toString(), sameOrigin: false };
 	}
 
-	return new URL(url, origin).toString();
+	const target = new URL(url, origin);
+	return {
+		target: target.toString(),
+		sameOrigin: target.origin === new URL(origin).origin,
+	};
 }
 
 function cacheKey(source: LLMsSource | undefined, resolvedUrl: string): string {
@@ -75,7 +95,10 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 		cache?.maxSize ?? DEFAULT_MAX_SIZE,
 	);
 
-	async function fetchSpec(resolvedUrl: string): Promise<OpenAPISpec> {
+	async function fetchSpec(
+		resolvedUrl: string,
+		sameOrigin: boolean,
+	): Promise<OpenAPISpec> {
 		if (!source) {
 			if (typeof fastify.swagger === "function") {
 				return fastify.swagger();
@@ -87,10 +110,12 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 			return parseFromFile(source.file, basePath);
 		}
 
-		// A relative URL always resolves to this server, so the SSRF guard (which
-		// blocks private hosts) would reject it for no benefit.
-		const skipValidation = source.skipValidation || !isAbsoluteUrl(source.url);
-		return parseFromUrl(resolvedUrl, skipValidation);
+		// A target on this server's own origin cannot be an SSRF vector, so the
+		// guard (which blocks private hosts) would reject it for no benefit.
+		return parseFromUrl(
+			resolvedUrl,
+			source.skipValidation === true || sameOrigin,
+		);
 	}
 
 	// Keeps the plugin's own routes out of the spec it documents. `hide` is
@@ -99,11 +124,16 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 
 	fastify.get("/llms.txt", routeOptions, async (req, reply) => {
 		try {
-			const resolvedUrl =
+			const resolved =
 				source?.type === "url"
-					? resolveSourceUrl(source.url, fastify, req)
-					: "";
-			const key = cacheKey(source, resolvedUrl);
+					? resolveSourceUrl(
+							source.url,
+							fastify,
+							req,
+							source.skipValidation === true,
+						)
+					: { target: "", sameOrigin: false };
+			const key = cacheKey(source, resolved.target);
 
 			if (cache?.enabled) {
 				const cached = cacheStore.get(key);
@@ -114,7 +144,7 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 				}
 			}
 
-			const spec = await fetchSpec(resolvedUrl);
+			const spec = await fetchSpec(resolved.target, resolved.sameOrigin);
 			let markdown = convertOpenAPIToMarkdown(spec);
 			if (header) markdown = `${header}\n\n${markdown}`;
 			if (footer) markdown = `${markdown}\n\n${footer}`;
