@@ -241,18 +241,29 @@ test("validateOptions", async (t) => {
 	});
 });
 
+// "/" on POSIX, "C:\\" (or whichever drive) on Windows.
+const root = path.parse(process.cwd()).root;
+
 test("validateFilePath works with a filesystem root as the base", () => {
 	// A prefix comparison would build "//" here and reject every descendant.
-	assert.strictEqual(validateFilePath("tmp/spec.json", "/"), "/tmp/spec.json");
-	assert.strictEqual(validateFilePath("/tmp/spec.json", "/"), "/tmp/spec.json");
+	const expected = path.join(root, "tmp", "spec.json");
+	assert.strictEqual(
+		validateFilePath(path.join("tmp", "spec.json"), root),
+		expected,
+	);
+	assert.strictEqual(validateFilePath(expected, root), expected);
 });
 
 test("isInside", () => {
-	assert.strictEqual(isInside("/base", "/base"), true);
-	assert.strictEqual(isInside("/base", "/base/child.json"), true);
-	assert.strictEqual(isInside("/base", "/base-evil/child.json"), false);
-	assert.strictEqual(isInside("/base", "/elsewhere"), false);
-	assert.strictEqual(isInside("/", "/tmp/spec.json"), true);
+	const base = path.join(root, "base");
+	assert.strictEqual(isInside(base, base), true);
+	assert.strictEqual(isInside(base, path.join(base, "child.json")), true);
+	assert.strictEqual(
+		isInside(base, path.join(root, "base-evil", "child.json")),
+		false,
+	);
+	assert.strictEqual(isInside(base, path.join(root, "elsewhere")), false);
+	assert.strictEqual(isInside(root, path.join(root, "tmp", "spec.json")), true);
 });
 
 test("validateOptions rejects arrays posing as objects", () => {
