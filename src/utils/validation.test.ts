@@ -2,7 +2,13 @@ import assert from "node:assert";
 import path from "node:path";
 import process from "node:process";
 import { test } from "node:test";
-import { validateFilePath, validateUrl } from "./validation.js";
+import type { LLMsOptions } from "../types.js";
+import {
+	isPrivateHost,
+	validateFilePath,
+	validateOptions,
+	validateUrl,
+} from "./validation.js";
 
 test("validateUrl", async (t) => {
 	await t.test("allows valid http/https urls", () => {
@@ -12,25 +18,57 @@ test("validateUrl", async (t) => {
 
 	await t.test("rejects non-http protocols", () => {
 		assert.throws(() => validateUrl("ftp://example.com"), /Invalid protocol/);
+		assert.throws(() => validateUrl("file:///etc/passwd"), /Invalid protocol/);
 	});
 
 	await t.test("rejects private/blocked hosts (SSRF)", () => {
-		assert.throws(() => validateUrl("http://localhost/foo"));
-		assert.throws(() => validateUrl("http://127.0.0.1/foo"));
-		assert.throws(() => validateUrl("http://192.168.1.1/foo"));
-		assert.throws(() => validateUrl("http://172.16.0.1/foo"));
-		assert.throws(() => validateUrl("http://10.0.0.1/foo"));
-		assert.throws(() => validateUrl("http://169.254.0.1/foo"));
-		assert.throws(() => validateUrl("http://[::1]/foo"));
+		for (const url of [
+			"http://localhost/foo",
+			"http://api.localhost/foo",
+			"http://127.0.0.1/foo",
+			"http://192.168.1.1/foo",
+			"http://172.16.0.1/foo",
+			"http://172.31.255.255/foo",
+			"http://10.0.0.1/foo",
+			"http://169.254.169.254/latest/meta-data",
+			"http://100.64.0.1/foo",
+			"http://0.0.0.0/foo",
+			"http://[::1]/foo",
+			"http://[::]/foo",
+			"http://[::ffff:127.0.0.1]/foo",
+			"http://[fe80::1]/foo",
+			"http://[fd00::1]/foo",
+		]) {
+			assert.throws(() => validateUrl(url), /SSRF Protection/, url);
+		}
+	});
+
+	await t.test("allows public hosts that look similar to private ones", () => {
+		assert.doesNotThrow(() => validateUrl("http://172.32.0.1/foo"));
+		assert.doesNotThrow(() => validateUrl("http://172.15.0.1/foo"));
+		assert.doesNotThrow(() => validateUrl("http://192.169.0.1/foo"));
+		assert.doesNotThrow(() => validateUrl("http://100.128.0.1/foo"));
+		assert.doesNotThrow(() => validateUrl("http://[2001:db8::1]/foo"));
+		assert.doesNotThrow(() => validateUrl("http://[::ffff:8.8.8.8]/foo"));
 	});
 
 	await t.test("handles relative URL strings (allows them)", () => {
 		assert.doesNotThrow(() => validateUrl("/foo/bar"));
+		assert.doesNotThrow(() => validateUrl("swagger/json"));
 	});
+});
 
-	await t.test("rejects bad urls that parse but are private", () => {
-		// already covered above
-	});
+test("isPrivateHost understands IPv4-mapped IPv6 in dotted form", () => {
+	assert.strictEqual(isPrivateHost("::ffff:127.0.0.1"), true);
+	assert.strictEqual(isPrivateHost("::ffff:8.8.8.8"), false);
+	assert.strictEqual(isPrivateHost("[::ffff:10.0.0.1]"), true);
+});
+
+test("isPrivateHost ignores malformed dotted hosts", () => {
+	assert.strictEqual(isPrivateHost("example.com"), false);
+	assert.strictEqual(isPrivateHost("10.0.0"), false);
+	assert.strictEqual(isPrivateHost("10.0.0.999"), false);
+	assert.strictEqual(isPrivateHost("10.a.0.1"), false);
 });
 
 test("validateFilePath", async (t) => {
@@ -41,11 +79,163 @@ test("validateFilePath", async (t) => {
 		assert.strictEqual(p, path.join(cwd, "src/index.ts"));
 	});
 
+	await t.test("allows the base path itself", () => {
+		assert.strictEqual(validateFilePath(".", cwd), cwd);
+	});
+
+	await t.test("defaults the base path to the working directory", () => {
+		assert.strictEqual(validateFilePath("src"), path.join(cwd, "src"));
+	});
+
 	await t.test("rejects traversal out of base", () => {
 		assert.throws(
 			() => validateFilePath("../outside.txt", cwd),
 			/Path Traversal/,
 		);
 		assert.throws(() => validateFilePath("/etc/passwd", cwd), /Path Traversal/);
+	});
+
+	await t.test("rejects a sibling directory sharing the base prefix", () => {
+		assert.throws(
+			() => validateFilePath(`${cwd}-evil/spec.json`, cwd),
+			/Path Traversal/,
+		);
+	});
+});
+
+test("validateOptions", async (t) => {
+	await t.test("accepts an empty object and a full configuration", () => {
+		assert.doesNotThrow(() => validateOptions({}));
+		assert.doesNotThrow(() =>
+			validateOptions({
+				source: { type: "url", url: "https://example.com/openapi.json" },
+				header: "# Header",
+				footer: "Footer",
+				contentType: "text/plain",
+				cache: { enabled: true, ttl: 1000, maxSize: 10 },
+			}),
+		);
+		assert.doesNotThrow(() =>
+			validateOptions({
+				source: { type: "file", file: "src/fixtures/sample.json" },
+			}),
+		);
+	});
+
+	await t.test("rejects a non-object", () => {
+		assert.throws(
+			() => validateOptions(undefined as unknown as LLMsOptions),
+			/expected an object/,
+		);
+		assert.throws(
+			() => validateOptions("nope" as unknown as LLMsOptions),
+			/expected an object/,
+		);
+	});
+
+	await t.test("rejects bad header/footer/basePath", () => {
+		assert.throws(
+			() => validateOptions({ header: 1 } as unknown as LLMsOptions),
+			/'header' must be a string/,
+		);
+		assert.throws(
+			() => validateOptions({ footer: 1 } as unknown as LLMsOptions),
+			/'footer' must be a string/,
+		);
+		assert.throws(
+			() => validateOptions({ basePath: 1 } as unknown as LLMsOptions),
+			/'basePath' must be a string/,
+		);
+	});
+
+	await t.test("rejects an unsupported contentType", () => {
+		assert.throws(
+			() =>
+				validateOptions({ contentType: "text/html" } as unknown as LLMsOptions),
+			/'contentType' must be one of/,
+		);
+	});
+
+	await t.test("rejects a malformed cache configuration", () => {
+		assert.throws(
+			() => validateOptions({ cache: null } as unknown as LLMsOptions),
+			/'cache' must be an object/,
+		);
+		assert.throws(
+			() => validateOptions({ cache: "yes" } as unknown as LLMsOptions),
+			/'cache' must be an object/,
+		);
+		assert.throws(
+			() => validateOptions({ cache: {} } as unknown as LLMsOptions),
+			/'cache.enabled' must be a boolean/,
+		);
+		assert.throws(
+			() => validateOptions({ cache: { enabled: true, ttl: 0 } }),
+			/'cache.ttl' must be a positive number/,
+		);
+		assert.throws(
+			() =>
+				validateOptions({
+					cache: { enabled: true, maxSize: "10" },
+				} as unknown as LLMsOptions),
+			/'cache.maxSize' must be a positive number/,
+		);
+		assert.throws(
+			() => validateOptions({ cache: { enabled: true, ttl: Number.NaN } }),
+			/'cache.ttl' must be a positive number/,
+		);
+	});
+
+	await t.test("rejects a malformed source", () => {
+		assert.throws(
+			() => validateOptions({ source: null } as unknown as LLMsOptions),
+			/'source' must be an object/,
+		);
+		assert.throws(
+			() =>
+				validateOptions({ source: { type: "ftp" } } as unknown as LLMsOptions),
+			/'source.type' must be either/,
+		);
+		assert.throws(
+			() =>
+				validateOptions({
+					source: { type: "file", file: "" },
+				} as unknown as LLMsOptions),
+			/'source.file' must be a non-empty string/,
+		);
+		assert.throws(
+			() =>
+				validateOptions({
+					source: { type: "url", url: 42 },
+				} as unknown as LLMsOptions),
+			/'source.url' must be a non-empty string/,
+		);
+	});
+
+	await t.test("propagates source validation failures", () => {
+		assert.throws(
+			() =>
+				validateOptions({ source: { type: "file", file: "../escape.json" } }),
+			/Path Traversal/,
+		);
+		assert.throws(
+			() =>
+				validateOptions({
+					source: { type: "url", url: "http://localhost/spec" },
+				}),
+			/SSRF Protection/,
+		);
+	});
+
+	await t.test("honours skipValidation for url sources", () => {
+		assert.doesNotThrow(() =>
+			validateOptions({
+				source: {
+					type: "url",
+					url: "http://localhost/spec",
+					skipValidation: true,
+				},
+			}),
+		);
 	});
 });

@@ -7,8 +7,11 @@
 	"type": "module",
 	"scripts": {
 		"build": "tsc",
+		"pretest": "npm run build",
 		"test": "npm run test:unit && npm run test:typescript",
-		"test:unit": "c8 --100 node --test dist/**/*.test.js",
+		"test:unit": "c8 --100 node --test \"dist/**/*.test.js\"",
+		"test:unit:report": "c8 --100 --reporter=html --reporter=text node --test \"dist/**/*.test.js\"",
+		"test:unit:verbose": "c8 --100 node --test --test-reporter=spec \"dist/**/*.test.js\"",
 		"test:typescript": "tsd",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
@@ -27,7 +30,7 @@
 	"license": "MIT",
 	"peerDependencies": {
 		"fastify": ">=5.0.0",
-		"js-yaml": "*"
+		"js-yaml": ">=4"
 	},
 	"peerDependenciesMeta": {
 		"js-yaml": {
@@ -35,21 +38,52 @@
 		}
 	},
 	"dependencies": {
-		"fastify-plugin": "^5.0.1"
+		"fastify-plugin": "^6.0.0"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^1.9.4",
-		"@fastify/swagger": "^9.4.0",
-		"@types/js-yaml": "^4.0.9",
-		"@types/node": "^22.13.1",
-		"c8": "^10.1.3",
-		"fastify": "^5.2.1",
-		"js-yaml": "^4.1.0",
-		"tsd": "^0.31.2",
-		"typescript": "^5.7.3"
+		"@biomejs/biome": "^2.5.12",
+		"@fastify/swagger": "^9.8.1",
+		"@types/node": "^26.4.1",
+		"c8": "^12.0.0",
+		"fastify": "^5.12.3",
+		"js-yaml": "^5.4.1",
+		"tsd": "^0.33.0",
+		"typescript": "^7.0.2"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=22.12.0"
 	},
-	"files": ["dist"]
+	"files": [
+		"dist",
+		"!dist/**/*.test.js",
+		"!dist/**/*.test.d.ts"
+	],
+	"tsd": {
+		"directory": "test-d",
+		"compilerOptions": {
+			"module": "nodenext",
+			"moduleResolution": "nodenext",
+			"target": "es2022",
+			"strict": true,
+			"lib": [
+				"es2022",
+				"dom"
+			]
+		}
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/MagdielCAS/fastify-llms-txt.git"
+	},
+	"bugs": {
+		"url": "https://github.com/MagdielCAS/fastify-llms-txt/issues"
+	},
+	"homepage": "https://github.com/MagdielCAS/fastify-llms-txt#readme"
 }

@@ -1,0 +1,48 @@
+openapi: 3.1.0
+info:
+  title: YAML API
+  version: 2.0.0
+  description: A YAML sample used by the test suite.
+servers:
+  - url: https://api.example.com
+    description: Production
+tags:
+  - name: greetings
+    description: Greeting endpoints
+security:
+  - bearerAuth: []
+paths:
+  /hello:
+    get:
+      operationId: sayHello
+      summary: Say Hello
+      tags:
+        - greetings
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Greeting"
+webhooks:
+  greeted:
+    post:
+      summary: Someone was greeted
+      responses:
+        "200":
+          description: Ack
+components:
+  schemas:
+    Greeting:
+      type: object
+      properties:
+        message:
+          type: string
+      required:
+        - message
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

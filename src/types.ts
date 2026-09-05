@@ -14,50 +14,102 @@ export interface LLMsOptions {
 	footer?: string;
 	contentType?: "text/markdown" | "text/plain";
 	cache?: LLMsCacheOptions;
+	/**
+	 * Base directory a `file` source must stay within.
+	 * Defaults to `process.cwd()`.
+	 */
+	basePath?: string;
+}
+
+export interface ExternalDocs {
+	description?: string;
+	url: string;
+}
+
+export interface Contact {
+	name?: string;
+	url?: string;
+	email?: string;
+}
+
+export interface License {
+	name: string;
+	identifier?: string;
+	url?: string;
+}
+
+export interface Info {
+	title: string;
+	version: string;
+	summary?: string;
+	description?: string;
+	termsOfService?: string;
+	contact?: Contact;
+	license?: License;
+}
+
+export interface ServerVariable {
+	default: string;
+	description?: string;
+	enum?: string[];
+}
+
+export interface Server {
+	url: string;
+	description?: string;
+	variables?: Record<string, ServerVariable>;
+}
+
+export interface Tag {
+	name: string;
+	description?: string;
+	externalDocs?: ExternalDocs;
+}
+
+/** A single `security` entry: scheme name mapped to the scopes it requires. */
+export type SecurityRequirement = Record<string, string[]>;
+
+export interface Components {
+	schemas?: Record<string, Schema | Reference>;
+	securitySchemes?: Record<string, SecurityScheme | Reference>;
+	parameters?: Record<string, Parameter | Reference>;
+	responses?: Record<string, Response | Reference>;
+	requestBodies?: Record<string, RequestBody | Reference>;
+	headers?: Record<string, Header | Reference>;
 }
 
 export interface OpenAPISpec {
 	openapi: string;
-	info: {
-		title: string;
-		version: string;
-		description?: string;
-		termsOfService?: string;
-		contact?: {
-			name?: string;
-			url?: string;
-			email?: string;
-		};
-		license?: {
-			name: string;
-			url?: string;
-		};
-	};
-	servers?: Array<{
-		url: string;
-		description?: string;
-		variables?: Record<
-			string,
-			{ default: string; description?: string; enum?: string[] }
-		>;
-	}>;
-	paths: Record<string, Record<string, Operation>>;
-	components?: {
-		schemas?: Record<string, Schema>;
-		securitySchemes?: Record<string, SecurityScheme>;
-		parameters?: Record<string, Parameter>;
-		responses?: Record<string, Response>;
-	};
-	tags?: Array<{
-		name: string;
-		description?: string;
-	}>;
-	externalDocs?: {
-		description?: string;
-		url: string;
-	};
-	webhooks?: Record<string, Operation | Reference>;
+	info: Info;
+	servers?: Server[];
+	paths?: Record<string, PathItem>;
+	components?: Components;
+	security?: SecurityRequirement[];
+	tags?: Tag[];
+	externalDocs?: ExternalDocs;
+	/** OpenAPI 3.1 webhooks. */
+	webhooks?: Record<string, PathItem | Reference>;
 }
+
+export const HTTP_METHODS = [
+	"get",
+	"put",
+	"post",
+	"delete",
+	"options",
+	"head",
+	"patch",
+	"trace",
+] as const;
+
+export type HttpMethod = (typeof HTTP_METHODS)[number];
+
+export type PathItem = {
+	summary?: string;
+	description?: string;
+	servers?: Server[];
+	parameters?: Array<Parameter | Reference>;
+} & Partial<Record<HttpMethod, Operation>>;
 
 export interface Operation {
 	tags?: string[];
@@ -66,17 +118,17 @@ export interface Operation {
 	operationId?: string;
 	parameters?: Array<Parameter | Reference>;
 	requestBody?: RequestBody | Reference;
-	responses: Record<string, Response | Reference>;
+	responses?: Record<string, Response | Reference>;
 	deprecated?: boolean;
-	security?: Array<Record<string, string[]>>;
-	externalDocs?: {
-		description?: string;
-		url: string;
-	};
+	security?: SecurityRequirement[];
+	servers?: Server[];
+	externalDocs?: ExternalDocs;
 }
 
 export interface Reference {
 	$ref: string;
+	summary?: string;
+	description?: string;
 }
 
 export interface Parameter {
@@ -87,7 +139,9 @@ export interface Parameter {
 	deprecated?: boolean;
 	allowEmptyValue?: boolean;
 	schema?: Schema | Reference;
-	type?: string; // OpenAPI 2.0 support
+	content?: Record<string, MediaType>;
+	example?: JsonValue;
+	examples?: Record<string, JsonValue>;
 }
 
 export interface RequestBody {
@@ -111,7 +165,7 @@ export interface MediaType {
 }
 
 export interface Response {
-	description: string;
+	description?: string;
 	headers?: Record<string, Header | Reference>;
 	content?: Record<string, MediaType>;
 }
@@ -124,6 +178,7 @@ export interface Header {
 }
 
 export interface Schema {
+	title?: string;
 	type?: string | string[];
 	format?: string;
 	description?: string;
@@ -131,9 +186,14 @@ export interface Schema {
 	required?: string[];
 	items?: Schema | Reference;
 	enum?: JsonValue[];
+	const?: JsonValue;
 	default?: JsonValue;
 	example?: JsonValue;
+	examples?: JsonValue[];
 	deprecated?: boolean;
+	nullable?: boolean;
+	readOnly?: boolean;
+	writeOnly?: boolean;
 	oneOf?: (Schema | Reference)[];
 	anyOf?: (Schema | Reference)[];
 	allOf?: (Schema | Reference)[];
@@ -144,15 +204,24 @@ export interface Schema {
 	maximum?: number;
 	minLength?: number;
 	maxLength?: number;
+	minItems?: number;
+	maxItems?: number;
+}
+
+export interface OAuthFlow {
+	authorizationUrl?: string;
+	tokenUrl?: string;
+	refreshUrl?: string;
+	scopes?: Record<string, string>;
 }
 
 export interface SecurityScheme {
-	type: "apiKey" | "http" | "oauth2" | "openIdConnect";
+	type: "apiKey" | "http" | "oauth2" | "openIdConnect" | "mutualTLS";
 	description?: string;
 	name?: string;
 	in?: "query" | "header" | "cookie";
 	scheme?: string;
 	bearerFormat?: string;
-	flows?: Record<string, JsonValue>;
+	flows?: Record<string, OAuthFlow>;
 	openIdConnectUrl?: string;
 }
