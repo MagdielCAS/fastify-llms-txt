@@ -291,3 +291,33 @@ test("validateOptions requires skipValidation to be a boolean", () => {
 		/'source.skipValidation' must be a boolean/,
 	);
 });
+
+test("isInside allows a child whose name merely begins with dots", () => {
+	// path.relative returns "..config/spec.json" here, which is not an escape.
+	const base = path.join(root, "base");
+	assert.strictEqual(
+		isInside(base, path.join(base, "..config", "spec.json")),
+		true,
+	);
+	assert.strictEqual(isInside(base, path.join(base, "..")), false);
+	assert.strictEqual(isInside(base, path.join(base, "..", "sibling")), false);
+});
+
+test("validateUrl rejects a malformed URL rather than assuming it is relative", () => {
+	// Registration is the fail-fast point; these used to surface per request.
+	for (const url of ["http://[", "http://exa mple.com", "https://"]) {
+		assert.throws(
+			() => validateUrl(url),
+			/neither a valid absolute URL nor a valid relative reference/,
+			url,
+		);
+	}
+});
+
+test("validateUrl checks the authority of a protocol-relative reference", () => {
+	assert.throws(
+		() => validateUrl("//169.254.169.254/latest/meta-data"),
+		/SSRF Protection: Host 169\.254\.169\.254 is blocked/,
+	);
+	assert.doesNotThrow(() => validateUrl("//example.com/openapi.json"));
+});

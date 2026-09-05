@@ -627,3 +627,38 @@ test("generatePaths skips a referenced path item", () => {
 		"",
 	);
 });
+
+test("a content-based parameter renders its media type and schema", () => {
+	// OpenAPI allows `content` in place of `schema`; both must not be dropped.
+	const output = generatePaths({
+		"/search": {
+			get: {
+				parameters: [
+					{
+						name: "filter",
+						in: "query",
+						description: "JSON filter",
+						content: {
+							"application/json": {
+								schema: { $ref: "#/components/schemas/Filter" },
+							},
+						},
+					},
+					{
+						name: "bare",
+						in: "query",
+						content: { "text/plain": {} },
+					},
+				],
+				responses: {},
+			},
+		},
+	});
+
+	assert.ok(
+		output.includes(
+			"- `filter` (query): JSON filter `application/json` Filter",
+		),
+	);
+	assert.ok(output.includes("- `bare` (query): `text/plain`"));
+});

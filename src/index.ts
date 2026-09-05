@@ -31,20 +31,21 @@ function trustedOrigin(fastify: FastifyInstance): string {
 }
 
 /**
- * Resolves a source URL and reports whether it points back at this server.
+ * Resolves a source URL and reports the origin that may skip the SSRF guard.
  *
- * Only `sameOrigin` targets may skip the SSRF guard, and only the listening
- * origin establishes that. Locality cannot be inferred from the shape of the
- * configured URL: a protocol-relative `//169.254.169.254/` looks relative but
- * resolves to a foreign host. Nor can the request's Host header stand in for
- * the server's own origin, since a client controls it.
+ * Only the listening origin establishes that trust, and it is handed down so
+ * it can be applied per redirect hop rather than to the whole chain. Locality
+ * cannot be inferred from the shape of the configured URL: a protocol-relative
+ * `//169.254.169.254/` looks relative but resolves to a foreign host. Nor can
+ * the request's Host header stand in for the server's own origin, since a
+ * client controls it.
  */
 function resolveSourceUrl(
 	url: string,
 	fastify: FastifyInstance,
 	req: FastifyRequest,
 	skipValidation: boolean,
-): { target: string; sameOrigin: boolean } {
+): { target: string; trustedOrigin: string } {
 	const origin = trustedOrigin(fastify);
 
 	if (!origin) {
@@ -52,7 +53,7 @@ function resolveSourceUrl(
 		// header is the only candidate left, so require an explicit opt-in.
 		if (!skipValidation) {
 			try {
-				return { target: new URL(url).toString(), sameOrigin: false };
+				return { target: new URL(url).toString(), trustedOrigin: "" };
 			} catch {
 				throw new Error(
 					`Cannot resolve the relative source URL '${url}': the server is not listening, so its own origin is unknown. Use an absolute URL, or set 'source.skipValidation' to resolve it against the request's Host header.`,
@@ -60,13 +61,12 @@ function resolveSourceUrl(
 			}
 		}
 		const base = `${req.protocol}://${req.hostname}`;
-		return { target: new URL(url, base).toString(), sameOrigin: false };
+		return { target: new URL(url, base).toString(), trustedOrigin: "" };
 	}
 
-	const target = new URL(url, origin);
 	return {
-		target: target.toString(),
-		sameOrigin: target.origin === new URL(origin).origin,
+		target: new URL(url, origin).toString(),
+		trustedOrigin: new URL(origin).origin,
 	};
 }
 
@@ -97,7 +97,7 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 
 	async function fetchSpec(
 		resolvedUrl: string,
-		sameOrigin: boolean,
+		originToTrust: string,
 	): Promise<OpenAPISpec> {
 		if (!source) {
 			if (typeof fastify.swagger === "function") {
@@ -110,12 +110,13 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 			return parseFromFile(source.file, basePath);
 		}
 
-		// A target on this server's own origin cannot be an SSRF vector, so the
+		// A hop on this server's own origin cannot be an SSRF vector, so the
 		// guard (which blocks private hosts) would reject it for no benefit.
-		return parseFromUrl(
-			resolvedUrl,
-			source.skipValidation === true || sameOrigin,
-		);
+		// Every other hop, redirects included, is still checked.
+		return parseFromUrl(resolvedUrl, {
+			skipValidation: source.skipValidation === true,
+			trustedOrigin: originToTrust,
+		});
 	}
 
 	// Keeps the plugin's own routes out of the spec it documents. `hide` is
@@ -132,7 +133,7 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 							req,
 							source.skipValidation === true,
 						)
-					: { target: "", sameOrigin: false };
+					: { target: "", trustedOrigin: "" };
 			const key = cacheKey(source, resolved.target);
 
 			if (cache?.enabled) {
@@ -144,7 +145,7 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 				}
 			}
 
-			const spec = await fetchSpec(resolved.target, resolved.sameOrigin);
+			const spec = await fetchSpec(resolved.target, resolved.trustedOrigin);
 			let markdown = convertOpenAPIToMarkdown(spec);
 			if (header) markdown = `${header}\n\n${markdown}`;
 			if (footer) markdown = `${markdown}\n\n${footer}`;

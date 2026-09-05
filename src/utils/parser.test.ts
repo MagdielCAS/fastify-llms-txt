@@ -153,7 +153,9 @@ test("parseFromUrl validates the URL unless told to skip", async (t) => {
 	);
 	assert.strictEqual(fetchMock.mock.callCount(), 0);
 
-	const spec = await parseFromUrl("http://127.0.0.1/openapi.json", true);
+	const spec = await parseFromUrl("http://127.0.0.1/openapi.json", {
+		skipValidation: true,
+	});
 	assert.strictEqual(spec.info.title, "Local");
 });
 
@@ -253,4 +255,90 @@ test("parseFromFile rejects a symlink escaping the base directory", async () => 
 
 	await fs.rm(dir, { recursive: true, force: true });
 	await fs.rm(outside, { recursive: true, force: true });
+});
+
+test("a trusted origin exempts only the hops still on it", async (t) => {
+	// A same-origin spec route that redirects away must not carry its
+	// exemption to the new host.
+	t.mock.method(globalThis, "fetch", async (input: unknown) => {
+		if (String(input) === "http://127.0.0.1:3000/swagger/json") {
+			return {
+				status: 302,
+				ok: false,
+				headers: new Headers({ location: "http://169.254.169.254/latest" }),
+			};
+		}
+		return {
+			status: 200,
+			ok: true,
+			headers: new Headers(),
+			text: async () =>
+				'{"openapi":"3.0.0","info":{"title":"Internal","version":"1"}}',
+		};
+	});
+
+	await assert.rejects(
+		() =>
+			parseFromUrl("http://127.0.0.1:3000/swagger/json", {
+				trustedOrigin: "http://127.0.0.1:3000",
+			}),
+		/SSRF Protection: Host 169\.254\.169\.254 is blocked/,
+	);
+});
+
+test("a trusted origin still exempts the initial hop", async (t) => {
+	// Without the exemption, the loopback host would be blocked outright.
+	t.mock.method(globalThis, "fetch", async () => ({
+		status: 200,
+		ok: true,
+		headers: new Headers(),
+		text: async () =>
+			'{"openapi":"3.0.0","info":{"title":"Self","version":"1"}}',
+	}));
+
+	const spec = await parseFromUrl("http://127.0.0.1:3000/swagger/json", {
+		trustedOrigin: "http://127.0.0.1:3000",
+	});
+	assert.strictEqual(spec.info.title, "Self");
+});
+
+test("skipValidation still opts out of every hop", async (t) => {
+	t.mock.method(globalThis, "fetch", async (input: unknown) => {
+		if (String(input) === "https://example.com/spec.json") {
+			return {
+				status: 302,
+				ok: false,
+				headers: new Headers({ location: "http://10.0.0.1/internal" }),
+			};
+		}
+		return {
+			status: 200,
+			ok: true,
+			headers: new Headers(),
+			text: async () =>
+				'{"openapi":"3.0.0","info":{"title":"Opted out","version":"1"}}',
+		};
+	});
+
+	const spec = await parseFromUrl("https://example.com/spec.json", {
+		skipValidation: true,
+	});
+	assert.strictEqual(spec.info.title, "Opted out");
+});
+
+test("a non-absolute target is never treated as trusted", async (t) => {
+	// Defensive: the plugin always resolves before calling, but a direct
+	// caller passing a relative URL must not inherit the exemption.
+	t.mock.method(globalThis, "fetch", async () => ({
+		status: 200,
+		ok: true,
+		headers: new Headers(),
+		text: async () =>
+			'{"openapi":"3.0.0","info":{"title":"Relative","version":"1"}}',
+	}));
+
+	const spec = await parseFromUrl("/swagger/json", {
+		trustedOrigin: "http://127.0.0.1:3000",
+	});
+	assert.strictEqual(spec.info.title, "Relative");
 });

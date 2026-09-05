@@ -119,21 +119,42 @@ export async function parseFromFile(
 	return parseSpec(content, realPath);
 }
 
+export interface FetchSpecOptions {
+	/** Bypass validation on every hop. The caller's explicit opt-out. */
+	skipValidation?: boolean;
+	/**
+	 * Origin that needs no validation because it is the server's own.
+	 * Applied per hop, so a redirect leaving this origin is still checked.
+	 */
+	trustedOrigin?: string;
+}
+
+function isTrusted(url: string, trustedOrigin: string): boolean {
+	if (!trustedOrigin) return false;
+	try {
+		return new URL(url).origin === trustedOrigin;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Fetches a URL, following redirects one hop at a time.
  *
  * `fetch` follows redirects itself, but only the first URL would ever be
  * validated: a permitted host could bounce the request to an internal address.
- * Every hop is checked instead.
+ * Every hop is checked instead, and `trustedOrigin` exempts only the hops that
+ * are still on that origin - a same-origin spec route that redirects elsewhere
+ * gets no free pass.
  */
 async function fetchFollowingRedirects(
 	url: string,
-	skipValidation: boolean,
+	{ skipValidation = false, trustedOrigin = "" }: FetchSpecOptions,
 ): Promise<Response> {
 	let target = url;
 
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-		if (!skipValidation) {
+		if (!skipValidation && !isTrusted(target, trustedOrigin)) {
 			validateUrl(target);
 		}
 
@@ -154,9 +175,9 @@ async function fetchFollowingRedirects(
 
 export async function parseFromUrl(
 	url: string,
-	skipValidation = false,
+	options: FetchSpecOptions = {},
 ): Promise<OpenAPISpec> {
-	const res = await fetchFollowingRedirects(url, skipValidation);
+	const res = await fetchFollowingRedirects(url, options);
 	if (!res.ok) {
 		throw new Error(`Failed to fetch spec from ${url}: ${res.statusText}`);
 	}

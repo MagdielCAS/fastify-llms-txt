@@ -314,6 +314,17 @@ function mergeParameters(
 	return [...merged.values()];
 }
 
+/** Renders the single media type of a `content`-based parameter. */
+function formatParameterContent(content: Record<string, MediaType>): string {
+	return Object.entries(content)
+		.map(([mediaType, details]) =>
+			details.schema
+				? `${formatInlineCode(mediaType)} ${formatSchemaName(details.schema)}`
+				: formatInlineCode(mediaType),
+		)
+		.join(", ");
+}
+
 function formatParameters(parameters: Array<Parameter | Reference>): string {
 	return formatList(
 		parameters.map((p) => {
@@ -322,7 +333,10 @@ function formatParameters(parameters: Array<Parameter | Reference>): string {
 			const details = [
 				`\`${p.name}${required}\` (${p.in}):`,
 				p.description,
-				p.schema && formatSchemaInline(p.schema),
+				// A parameter carries either `schema` or `content`, never both.
+				p.schema
+					? formatSchemaInline(p.schema)
+					: p.content && formatParameterContent(p.content),
 			].filter((part): part is string => Boolean(part));
 			if (p.deprecated) details.push(formatBold("DEPRECATED"));
 			return details.join(" ");

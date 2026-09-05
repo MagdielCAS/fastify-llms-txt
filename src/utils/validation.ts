@@ -4,6 +4,9 @@ import type { LLMsOptions } from "../types.js";
 
 const CONTENT_TYPES = new Set(["text/markdown", "text/plain"]);
 
+/** Base used only to tell a relative reference apart from a malformed URL. */
+const DUMMY_BASE = "http://relative.invalid";
+
 /** Strips the brackets the WHATWG URL parser keeps around IPv6 hosts. */
 function normalizeHostname(hostname: string): string {
 	const lower = hostname.toLowerCase();
@@ -77,7 +80,25 @@ export function validateUrl(inputUrl: string): void {
 	try {
 		parsed = new URL(inputUrl);
 	} catch {
-		// Not an absolute URL - it resolves against the local server, nothing to check.
+		// Not absolute. It may be a relative reference, resolved against this
+		// server's own origin later - or it may simply be malformed, which
+		// should fail now rather than on the first request.
+		let relative: URL;
+		try {
+			relative = new URL(inputUrl, DUMMY_BASE);
+		} catch {
+			throw new Error(
+				`Invalid URL: '${inputUrl}' is neither a valid absolute URL nor a valid relative reference.`,
+			);
+		}
+
+		// A protocol-relative reference ("//host/path") carries its own
+		// authority, so its host faces the same checks as an absolute one.
+		if (inputUrl.startsWith("//") && isPrivateHost(relative.hostname)) {
+			throw new Error(
+				`Invalid URL: SSRF Protection: Host ${relative.hostname} is blocked.`,
+			);
+		}
 		return;
 	}
 
@@ -103,9 +124,12 @@ export function validateUrl(inputUrl: string): void {
 export function isInside(base: string, target: string): boolean {
 	if (target === base) return true;
 	const relative = path.relative(base, target);
+	// Only an exact ".." segment escapes; a child may legitimately be named
+	// "..config". An absolute result means a different Windows drive.
 	return (
 		relative.length > 0 &&
-		!relative.startsWith("..") &&
+		relative !== ".." &&
+		!relative.startsWith(`..${path.sep}`) &&
 		!path.isAbsolute(relative)
 	);
 }

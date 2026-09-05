@@ -220,22 +220,43 @@ test("fastify-llms-txt plugin", async (t) => {
 
 	await t.test(
 		"a protocol-relative source URL is not treated as local",
+		async () => {
+			// '//host/path' looks relative but carries its own authority, so it
+			// faces the SSRF guard - at registration, before any request.
+			const fastify = Fastify();
+			await assert.rejects(async () => {
+				await fastify.register(fastifyLlmsTxt, {
+					source: { type: "url", url: "//169.254.169.254/latest/meta-data" },
+				});
+			}, /SSRF Protection: Host 169\.254\.169\.254 is blocked/);
+		},
+	);
+
+	await t.test(
+		"a protocol-relative URL to a public host is fetched off-origin",
 		async (st) => {
-			// '//host/path' looks relative but resolves to a foreign origin, so
-			// it must still face the SSRF guard.
-			const fetchMock = mockFetch(st, "{}");
+			// It must resolve to that foreign host, not to a path on ourselves.
+			const fetchMock = mockFetch(
+				st,
+				JSON.stringify({
+					openapi: "3.0.0",
+					info: { title: "Foreign", version: "1.0.0" },
+					paths: {},
+				}),
+			);
 
 			const fastify = Fastify();
 			await fastify.register(fastifyLlmsTxt, {
-				source: { type: "url", url: "//169.254.169.254/latest/meta-data" },
+				source: { type: "url", url: "//example.com/openapi.json" },
 			});
 			await fastify.listen({ port: 0, host: "127.0.0.1" });
 			t.after(() => fastify.close());
 
 			const res = await fastify.inject({ method: "GET", url: "/llms.txt" });
-			assert.strictEqual(res.statusCode, 500);
-			assert.ok(res.payload.includes("SSRF Protection"));
-			assert.strictEqual(fetchMock.mock.callCount(), 0);
+			assert.strictEqual(res.statusCode, 200);
+
+			const requested = String(fetchMock.mock.calls[0]?.arguments[0]);
+			assert.strictEqual(requested, "http://example.com/openapi.json");
 		},
 	);
 
