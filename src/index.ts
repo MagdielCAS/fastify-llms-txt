@@ -60,7 +60,7 @@ function resolveSourceUrl(
 				);
 			}
 		}
-		const base = `${req.protocol}://${req.hostname}`;
+		const base = `${req.protocol}://${req.host}`;
 		return { target: new URL(url, base).toString(), trustedOrigin: "" };
 	}
 
