@@ -44,7 +44,7 @@ function isPrivateIPv4(hostname: string): boolean {
 
 /** Checks whether a hostname points at the local machine or a private network. */
 export function isPrivateHost(hostname: string): boolean {
-	const host = normalizeHostname(hostname);
+	const host = normalizeHostname(hostname).replace(/\.$/, "");
 
 	if (host === "localhost" || host.endsWith(".localhost")) return true;
 	if (isPrivateIPv4(host)) return true;
