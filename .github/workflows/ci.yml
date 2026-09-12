@@ -30,4 +30,9 @@ jobs:
     uses: fastify/workflows/.github/workflows/plugins-ci.yml@v5
     with:
       license-check: true
+      # argparse, pulled in transitively by the optional js-yaml peer
+      # dependency, is Python-2.0 (permissive, OSI-approved).
+      license-check-allowed-additional: 'Python-2.0'
       lint: true
+      # Matches "engines" in package.json; Node 20 reached end of life.
+      node-versions: '["22", "24"]'

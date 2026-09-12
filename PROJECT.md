@@ -3,89 +3,96 @@
 This document explains what the project does, why it exists, and how it is put together so an experienced developer can recreate or extend it.
 
 ## Purpose
-- Provide an Fastify plugin that exposes `/llms.txt` (and `/llms-full.txt` as a 301 alias) containing LLM‑friendly Markdown derived from an OpenAPI/Swagger specification.
+- Provide a Fastify plugin that exposes `/llms.txt` (and `/llms-full.txt` as a 301 alias) containing LLM-friendly Markdown derived from an OpenAPI/Swagger specification.
 - Automate generation of concise, structured API docs that large language models can ingest for grounding or training.
 
 ## High-Level Architecture
+- **Registration**: `validateOptions` checks the supplied `LLMsOptions` when the plugin is registered, so a misconfiguration fails at boot instead of on the first request. Both routes are registered with `schema: { hide: true }` so they stay out of the document they generate.
 - **Request flow (`GET /llms.txt`)**:
-  1) Validate supplied `LLMsOptions` (`validateOptions`).
-  2) Resolve source: load spec from file (`parseFromFile`) or fetch URL (`parseFromUrl`, with SSRF checks unless `skipValidation` is set for same-server URLs).
-  3) Convert the OpenAPI document to Markdown via `OpenAPIToMarkdownConverter`.
-  4) Prepend `header`/append `footer` if provided.
-  5) Optionally cache the rendered output in an in‑memory LRU cache (TTL and size configurable).
-  6) Write `Content-Type` header (`text/markdown` default, `text/plain` supported) and return the body.
+  1) Resolve the cache key from the source (file path, resolved URL, or `swagger`).
+  2) Return the cached body if caching is enabled and the entry is still fresh.
+  3) Resolve the source: `@fastify/swagger` when no `source` is configured, `parseFromFile` for files, `parseFromUrl` for URLs.
+  4) Convert the OpenAPI document to Markdown via `OpenAPIToMarkdownConverter`.
+  5) Prepend `header` / append `footer` if provided.
+  6) Store the rendered output in the in-memory LRU cache when caching is enabled.
+  7) Write `Content-Type` (`text/markdown` default, `text/plain` supported) and return the body.
 - **Redirect**: `/llms-full.txt` responds with a 301 redirect to `/llms.txt`.
-- **Distribution**: built ESM output lives in `dist/`; types are emitted alongside for consumers.
+- **Errors**: any failure returns HTTP 500 with a concise message; the route handler never throws.
+- **Distribution**: built ESM output lives in `dist/`; declarations are emitted alongside for consumers.
 
 ## Feature Set
-- OpenAPI 3.0 and 3.1 support (JSON or YAML; YAML parsed when `js-yaml` peer dep is present).
-- Flexible sources: local file (path validated against traversal) or URL (blocked host list to prevent SSRF).
+- OpenAPI 3.0 and 3.1 support (JSON or YAML; YAML parsed when the optional `js-yaml` peer dependency is present).
+- Flexible sources: `@fastify/swagger`, a local file (validated against traversal), or a URL (validated against SSRF).
 - Markdown tailored for LLMs: consistent headings, bolding, code formatting, and indented lists for hierarchies.
-- Auto-generated sections: API overview, metadata, servers, auth, tags, endpoints, webhooks, and components (schemas, security schemes, response and parameter definitions).
-- Caching: optional LRU with TTL and max size controls; adds `X-Cache: HIT|MISS` header when enabled.
-- Configurable headers/footers and response content type.
-- Safe defaults: default source `/swagger/json`, `text/markdown` output, caching off.
+- Auto-generated sections: API overview, external docs, servers, authentication, tags, endpoints, webhooks, and components (schemas, security schemes, reusable responses and parameters).
+- Caching: optional LRU with TTL and max-size controls; adds `X-Cache: HIT|MISS` when enabled.
+- Configurable header/footer and response content type.
+- Safe defaults: `@fastify/swagger` auto-detection, `text/markdown` output, caching off.
 
 ## Inputs and Configuration (`LLMsOptions`)
-- `source` (required): `{ type: 'file' | 'url'; file?: string; url?: string }`
-  - `file`: absolute or relative path; validated to stay under `basePath` (defaults to `process.cwd()` in validation helper).
-  - `url`: absolute or relative. Relative URLs resolve against the running Fastify server URL; non-HTTP(S) or internal/blocked hosts are rejected.
-- `header` / `footer`: arbitrary Markdown appended before/after generated content.
+- `source` (optional): `{ type: 'file'; file: string }` or `{ type: 'url'; url: string; skipValidation?: boolean }`. When omitted, the plugin calls `fastify.swagger()`.
+  - `file`: absolute or relative path; validated to stay under `basePath`.
+  - `url`: absolute or relative. It is resolved against `fastify.listeningOrigin`, and the SSRF check is skipped only when the *resolved* target lands on that same origin — locality is never inferred from the shape of the configured string, so a protocol-relative `//host/path` is validated like any other absolute URL. While the server is not listening there is no trusted origin to compare against and the `Host` header is client-controlled, so a relative URL fails with a clear error unless `skipValidation` opts into `Host`-based resolution.
+- `header` / `footer`: arbitrary Markdown placed before/after the generated content.
 - `contentType`: `text/markdown` (default) or `text/plain`; suffixed with `; charset=utf-8`.
-- `cache`: `{ enabled: boolean; ttl?: number; maxSize?: number }` with defaults `ttl=60000 ms`, `maxSize=100` when omitted.
+- `basePath`: directory a `file` source must stay within; defaults to `process.cwd()`.
+- `cache`: `{ enabled: boolean; ttl?: number; maxSize?: number }` with defaults `ttl=60000 ms`, `maxSize=100`.
 
 ## Conversion Pipeline (`OpenAPIToMarkdownConverter`)
-- Defined in `/Users/magdielcampelo/Development/fastify-llms-txt/src/converter.ts` and helpers under `/Users/magdielcampelo/Development/fastify-llms-txt/src/generators`.
-- Sections produced (in order):
-  - Title and version, OpenAPI version line.
-  - Description.
-  - Contact, License, Terms of Service, External Docs.
-  - Servers (including templated variables), Authentication (global security), API Groups (tags).
-  - Endpoints: for each path+method, includes summary/title, HTTP verb + path, deprecation flag, description, tags, operationId, endpoint-level security, parameters (name/location/type/required/description), request body content types and schemas, response status codes and media types. Webhooks (OpenAPI 3.1) are rendered similarly.
-  - Data Models (components): schemas with descriptions/properties/enums/arrays, security schemes (http/apiKey/oauth2/openIdConnect), response and parameter component references.
-- Formatting utilities in `/Users/magdielcampelo/Development/fastify-llms-txt/src/generators/format.ts` standardize headings, inline code, lists, links, and schema name rendering (including `$ref` resolution).
+- Defined in `src/converter.ts`, with per-section generators in `src/generators/sections.ts` and formatting primitives in `src/generators/format.ts`.
+- The constructor rejects documents that are not objects or that lack `info.title`; `convert()` renders the document and is safe to call repeatedly.
+- Sections are emitted in this order, and empty ones are dropped:
+  - Title and version, OpenAPI version line, summary, description, terms of service, contact, license.
+  - External Documentation.
+  - Servers, including templated variables with their defaults, allowed values, and descriptions.
+  - Authentication: the top-level `security` requirements, rendered as `AND` within a requirement and `OR` between them.
+  - API Groups: `tags` with descriptions and external docs.
+  - Endpoints: for each path and HTTP method — summary/title, verb and path, deprecation flag, description, tags, `operationId`, endpoint-level security, external docs, parameters (path-level parameters are inherited by every operation), request body content types and schemas, and responses with status codes, media types and headers.
+  - Webhooks (OpenAPI 3.1), rendered like endpoints.
+  - Data Models: component schemas (types, formats, constraints, enums, composition keywords, properties expanded up to two levels), security schemes (`http`, `apiKey`, `oauth2` including flows and scopes, `openIdConnect`, `mutualTLS`), reusable responses, and reusable parameters.
+- `format.ts` standardises headings, inline code, code blocks, lists, links, `$ref` resolution (including `~0`/`~1` JSON-Pointer escapes) and short schema names such as `User[]` or `string | number`.
 
 ## Validation and Safety
-- URL validation (`validateUrl`): rejects non-http(s) protocols and blocks localhost, loopback, link-local, and private-network ranges to mitigate SSRF.
-- File path validation (`validateFilePath`): normalizes and ensures resolved path stays within a base directory to prevent traversal.
-- YAML parsing: attempted only when extension suggests YAML or content is non-JSON. If `js-yaml` is missing, an explicit error guides installation.
-- Error handling: failures return HTTP 500 with a concise error message string; plugin does not throw uncaught errors in route handler.
+- URL validation (`validateUrl`): rejects non-`http(s)` protocols and blocks localhost, loopback, unspecified, link-local (including cloud metadata endpoints), unique-local, carrier-grade-NAT and private-network hosts across IPv4, IPv6 and IPv4-mapped IPv6 (both the dotted and hex spellings the URL parser produces). Redirects are followed manually, one hop at a time, so every hop is validated and a permitted host cannot bounce the request inward; the hop count is capped.
+  - Known limitation: the check is by hostname, so DNS rebinding (a public name resolving to a private address) is not caught. Closing that needs address resolution plus connection pinning through a custom dispatcher. `source` is developer-configured rather than request-supplied, so the exposure is limited, but `source.url` should not be fed untrusted input.
+- File path validation (`validateFilePath`): resolves the path with `path.relative` and ensures it stays inside the base directory, so a sibling sharing the base prefix is rejected and a filesystem root works as a base. `parseFromFile` then re-checks the canonical path via `fs.realpath`, so a symlink inside the base cannot point outside it.
+- Option validation (`validateOptions`): checks types and shapes for `header`, `footer`, `basePath`, `contentType`, `cache` and `source`, and runs the path/URL guards eagerly.
+- YAML parsing: attempted when the source name suggests YAML or the content is not JSON. A JSON document served from a `.yaml` URL still parses without `js-yaml`; when YAML really is needed and the module is missing, the error explains how to install it.
 
 ## Caching Details
-- LRU cache implemented in `/Users/magdielcampelo/Development/fastify-llms-txt/src/index.ts` using `Map` insertion order; key is derived from `source` (file path or URL).
-- Cache entry stores rendered output and timestamp. Expired entries based on TTL cause regeneration. Cache size evicts least-recently-used entries when exceeding `maxSize`.
+- `LRUCache` (`src/utils/cache.ts`) is backed by `Map` insertion order: reads refresh recency without resetting the TTL, writes evict the least recently used entries beyond `maxSize`, and expired entries are dropped on read.
+- The key is derived from the source: `file:<path>`, `url:<resolved absolute url>`, or `swagger`.
 
 ## Build, Test, and Lint
-- Toolchain: TypeScript, Node (c8, tsd) runtime for tests and scripts, biome for formatting and linting.
+- Toolchain: TypeScript 7, the Node.js test runner with c8 for coverage, tsd for type tests, Biome 2 for formatting and linting.
 - Key scripts (`package.json`):
-  - `"test": "npm run test:unit && npm run test:typescript"`
-  - `"test:typescript": "tsd"`
-  - `"test:unit": "c8 --100 node --test"`
-  - `"test:unit:report": "npm run test:unit -- --coverage-report=html"`
-  - `"test:unit:verbose": "npm run test:unit -- -Rspec"`
-  - `biome check --write src` for lint/format.
-- Peer dependencies: `fastify` (>=5.0.0) and optional `js-yaml` for YAML support. Runtime engines: Node >=20, TypeScript >=5.0.
+  - `"build": "tsc"` — emits ESM plus declarations into `dist/`.
+  - `"test": "npm run test:unit && npm run test:typescript"` (a `pretest` hook builds first).
+  - `"test:unit": "c8 --100 node --test \"dist/**/*.test.js\""` — 100% statement, branch, function and line coverage is enforced.
+  - `"test:typescript": "tsd"` — type-level assertions in `test-d/`.
+  - `"lint" / "lint:fix": "biome check ." / "biome check --write ."`.
+- Peer dependencies: `fastify` (>=5.0.0) and the optional `js-yaml` (>=4). Runtime engine: Node >=22.12.0.
 
 ## Creating a Plugin
 - Framework hook: expose a small Fastify plugin that registers HTTP routes and wraps external resources behind validation and conversion utilities.
-- Converter design: separate pure Markdown generators per OpenAPI section; keep format helpers centralized for consistent output.
-- Safety first: add SSRF and path traversal guards; keep YAML optional to avoid unnecessary bundle weight.
-- Ergonomics: support headers/footers, content-type choice, and cache control; return helpful headers like `X-Cache` to aid debugging.
-- Tests: include unit tests for validators and converter outputs plus integration tests that spin up an in-memory Fastify server to assert routes, headers, and caching behavior.
+- Converter design: keep one pure Markdown generator per OpenAPI section and centralise the format helpers so the output stays consistent and diffable.
+- Safety first: add SSRF and path-traversal guards, validate options at registration, and keep YAML optional to avoid unnecessary bundle weight.
+- Ergonomics: support headers/footers, content-type choice and cache control, and return helpful headers like `X-Cache` to aid debugging.
+- Tests: unit tests for the validators, cache, parser and converter output, plus integration tests that spin up an in-memory Fastify server to assert routes, headers and caching behaviour.
 
 ## Minimal Usage Example
 ```typescript
 import Fastify from 'fastify';
 import llms from 'fastify-llms-txt';
 
-const fastify = Fastify()
-  .register(llms, {
-    source: { type: 'url', url: '/swagger/json' },
-    header: '# API Docs for LLMs',
-    cache: { enabled: true, ttl: 60_000 },
-  })
-  .listen(3000);
+const fastify = Fastify();
+await fastify.register(llms, {
+  source: { type: 'url', url: '/documentation/json' },
+  header: '# API Docs for LLMs',
+  cache: { enabled: true, ttl: 60_000 },
+});
+await fastify.listen({ port: 3000 });
 // GET http://localhost:3000/llms.txt returns generated Markdown
 ```
 
-Use this documentation as the canonical reference for reproducing the project’s functionality or adapting it to other frameworks.
+Use this documentation as the canonical reference for reproducing the project's functionality or adapting it to other frameworks.

@@ -1,11 +1,15 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { URL } from "node:url";
-import type { FastifyPluginAsync, FastifyRequest } from "fastify";
+import type {
+	FastifyInstance,
+	FastifyPluginAsync,
+	FastifyRequest,
+	RouteShorthandOptions,
+} from "fastify";
 import fp from "fastify-plugin";
 import { convertOpenAPIToMarkdown } from "./converter.js";
-import type { LLMsOptions, OpenAPISpec } from "./types.js";
-import { validateFilePath, validateUrl } from "./utils/validation.js";
+import type { LLMsOptions, LLMsSource, OpenAPISpec } from "./types.js";
+import { LRUCache } from "./utils/cache.js";
+import { parseFromFile, parseFromUrl } from "./utils/parser.js";
+import { validateOptions } from "./utils/validation.js";
 
 declare module "fastify" {
 	interface FastifyInstance {
@@ -13,122 +17,141 @@ declare module "fastify" {
 	}
 }
 
+const DEFAULT_TTL = 60_000;
+const DEFAULT_MAX_SIZE = 100;
+
+/** The origin this server answers on, or "" when it is not listening yet. */
+function trustedOrigin(fastify: FastifyInstance): string {
+	try {
+		return fastify.listeningOrigin;
+	} catch {
+		// `listeningOrigin` throws while there is no bound address.
+		return "";
+	}
+}
+
+/**
+ * Resolves a source URL and reports the origin that may skip the SSRF guard.
+ *
+ * Only the listening origin establishes that trust, and it is handed down so
+ * it can be applied per redirect hop rather than to the whole chain. Locality
+ * cannot be inferred from the shape of the configured URL: a protocol-relative
+ * `//169.254.169.254/` looks relative but resolves to a foreign host. Nor can
+ * the request's Host header stand in for the server's own origin, since a
+ * client controls it.
+ */
+function resolveSourceUrl(
+	url: string,
+	fastify: FastifyInstance,
+	req: FastifyRequest,
+	skipValidation: boolean,
+): { target: string; trustedOrigin: string } {
+	const origin = trustedOrigin(fastify);
+
+	if (!origin) {
+		// No bound address (fastify.inject, serverless adaptors). The Host
+		// header is the only candidate left, so require an explicit opt-in.
+		if (!skipValidation) {
+			try {
+				return { target: new URL(url).toString(), trustedOrigin: "" };
+			} catch {
+				throw new Error(
+					`Cannot resolve the relative source URL '${url}': the server is not listening, so its own origin is unknown. Use an absolute URL, or set 'source.skipValidation' to resolve it against the request's Host header.`,
+				);
+			}
+		}
+		const base = `${req.protocol}://${req.host}`;
+		return { target: new URL(url, base).toString(), trustedOrigin: "" };
+	}
+
+	return {
+		target: new URL(url, origin).toString(),
+		trustedOrigin: new URL(origin).origin,
+	};
+}
+
+function cacheKey(source: LLMsSource | undefined, resolvedUrl: string): string {
+	if (!source) return "swagger";
+	return source.type === "file" ? `file:${source.file}` : `url:${resolvedUrl}`;
+}
+
 const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 	fastify,
 	options,
 ) => {
+	validateOptions(options);
+
 	const {
 		source,
 		header,
 		footer,
 		cache,
+		basePath,
 		contentType = "text/markdown",
 	} = options;
 
-	// Simple LRU Cache
-	const cacheStore = new Map<string, { content: string; timestamp: number }>();
-	const CACHE_TTL = cache?.ttl ?? 60_000;
-	const CACHE_MAX = cache?.maxSize ?? 100;
+	const cacheStore = new LRUCache(
+		cache?.ttl ?? DEFAULT_TTL,
+		cache?.maxSize ?? DEFAULT_MAX_SIZE,
+	);
 
-	async function fetchSpec(req: FastifyRequest): Promise<OpenAPISpec> {
+	async function fetchSpec(
+		resolvedUrl: string,
+		originToTrust: string,
+	): Promise<OpenAPISpec> {
 		if (!source) {
-			// Try Fastify Swagger
-			const swaggerPlugin = fastify.swagger;
-			if (typeof swaggerPlugin === "function") {
-				return swaggerPlugin();
+			if (typeof fastify.swagger === "function") {
+				return fastify.swagger();
 			}
 			throw new Error("No source provided and fastify-swagger not detected.");
 		}
 
-		let content: string;
-
 		if (source.type === "file") {
-			const filePath = validateFilePath(source.file);
-			content = await fs.readFile(filePath, "utf-8");
-		} else {
-			// URL Source
-			let targetUrl = source.url;
-			// Resolve relative URL
-			if (!targetUrl.startsWith("http")) {
-				const protocol = req.protocol;
-				const host = req.hostname;
-				targetUrl = `${protocol}://${host}${targetUrl.startsWith("/") ? "" : "/"}${targetUrl}`;
-			}
-
-			if (!source.skipValidation) {
-				// Validate resolved absolute URL
-				validateUrl(targetUrl);
-			}
-
-			const res = await fetch(targetUrl);
-			if (!res.ok) {
-				throw new Error(
-					`Failed to fetch spec from ${targetUrl}: ${res.statusText}`,
-				);
-			}
-			content = await res.text();
+			return parseFromFile(source.file, basePath);
 		}
 
-		// Attempt Parse
-		try {
-			return JSON.parse(content);
-		} catch {
-			// Try YAML
-			try {
-				const yaml = await import("js-yaml");
-				return yaml.load(content) as OpenAPISpec;
-			} catch (e: unknown) {
-				if (
-					e &&
-					typeof e === "object" &&
-					"code" in e &&
-					(e as { code: string }).code === "ERR_MODULE_NOT_FOUND"
-				) {
-					throw new Error(
-						"Received YAML (or invalid JSON) but 'js-yaml' is not installed.",
-					);
-				}
-				throw new Error("Failed to parse OpenAPI spec (Invalid JSON/YAML)");
-			}
-		}
+		// A hop on this server's own origin cannot be an SSRF vector, so the
+		// guard (which blocks private hosts) would reject it for no benefit.
+		// Every other hop, redirects included, is still checked.
+		return parseFromUrl(resolvedUrl, {
+			skipValidation: source.skipValidation === true,
+			trustedOrigin: originToTrust,
+		});
 	}
-	fastify.get("/llms.txt", async (req, reply) => {
+
+	// Keeps the plugin's own routes out of the spec it documents. `hide` is
+	// read by @fastify/swagger; plain Fastify ignores it.
+	const routeOptions = { schema: { hide: true } } as RouteShorthandOptions;
+
+	fastify.get("/llms.txt", routeOptions, async (req, reply) => {
 		try {
-			let key = "";
-			if (source) {
-				if (source.type === "file") {
-					key = `file:${source.file}`;
-				} else {
-					if (source.url.startsWith("http")) {
-						key = `url:${source.url}`;
-					} else {
-						key = `url:${req.protocol}://${req.hostname}${source.url}`;
-					}
-				}
-			} else {
-				key = "swagger";
-			}
+			const resolved =
+				source?.type === "url"
+					? resolveSourceUrl(
+							source.url,
+							fastify,
+							req,
+							source.skipValidation === true,
+						)
+					: { target: "", trustedOrigin: "" };
+			const key = cacheKey(source, resolved.target);
 
 			if (cache?.enabled) {
 				const cached = cacheStore.get(key);
-				if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+				if (cached !== undefined) {
 					reply.header("X-Cache", "HIT");
 					reply.type(`${contentType}; charset=utf-8`);
-					return cached.content;
+					return cached;
 				}
 			}
 
-			const spec = await fetchSpec(req);
+			const spec = await fetchSpec(resolved.target, resolved.trustedOrigin);
 			let markdown = convertOpenAPIToMarkdown(spec);
 			if (header) markdown = `${header}\n\n${markdown}`;
 			if (footer) markdown = `${markdown}\n\n${footer}`;
 
 			if (cache?.enabled) {
-				if (cacheStore.size >= CACHE_MAX) {
-					const firstKey = cacheStore.keys().next().value;
-					if (firstKey) cacheStore.delete(firstKey);
-				}
-				cacheStore.set(key, { content: markdown, timestamp: Date.now() });
+				cacheStore.set(key, markdown);
 				reply.header("X-Cache", "MISS");
 			}
 
@@ -137,12 +160,12 @@ const fastifyLlmsTxt: FastifyPluginAsync<LLMsOptions> = async (
 		} catch (err: unknown) {
 			fastify.log.error(err);
 			const message = err instanceof Error ? err.message : String(err);
-			reply.status(500).send(`Error processing request: ${message}`);
+			return reply.status(500).send(`Error processing request: ${message}`);
 		}
 	});
 
-	fastify.get("/llms-full.txt", async (req, reply) => {
-		reply.code(301).redirect("/llms.txt");
+	fastify.get("/llms-full.txt", routeOptions, async (_req, reply) => {
+		return reply.redirect("/llms.txt", 301);
 	});
 };
 
@@ -150,3 +173,23 @@ export default fp(fastifyLlmsTxt, {
 	name: "fastify-llms-txt",
 	fastify: "5.x",
 });
+
+export {
+	convertOpenAPIToMarkdown,
+	OpenAPIToMarkdownConverter,
+} from "./converter.js";
+export type {
+	Info,
+	LLMsCacheOptions,
+	LLMsOptions,
+	LLMsSource,
+	OpenAPISpec,
+	Operation,
+	Parameter,
+	PathItem,
+	Reference,
+	RequestBody,
+	Response,
+	Schema,
+	SecurityScheme,
+} from "./types.js";
