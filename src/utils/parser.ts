@@ -167,6 +167,7 @@ async function fetchFollowingRedirects(
 		if (!location) {
 			return res;
 		}
+		await res.body?.cancel();
 		target = new URL(location, target).toString();
 	}
 
